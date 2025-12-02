@@ -1,66 +1,149 @@
 # Home-NAS
 
-A lightweight, container-based NAS system built on an unused Windows laptop repurposed as a Linux server.  
-This project demonstrates practical system design and service orchestration using Ubuntu 24.04, Docker, Plex, Immich, Samba, and an external USB storage device.
+A fully containerized, low-cost home NAS built from an unused Windows laptop running Ubuntu 24.04.  
+This project demonstrates practical system design, Linux configuration, Docker orchestration, persistent storage design, and multi‑service deployment (Plex, Immich, Samba, SMART monitoring).
 
-## 1. Overview
+The goal was to build a reliable, headless NAS and media platform using commodity hardware — with architectural thinking similar to production systems.
 
-This project converts a spare laptop into a functional home server capable of:
+---
 
-- Hosting a Plex media library  
-- Running Immich as a self-hosted photo and video backup service  
-- Sharing files over the local network using SMB  
-- Mounting and serving data from a 5TB USB 3.0 external drive  
-- Operating headlessly through SSH  
-
-The goal was to build a reliable, low-cost NAS solution while applying modern infrastructure practices such as containerization, persistent storage mapping, and network service configuration.
-
-## 2. System Architecture
+# 1. System Architecture
 
 ```
-Laptop (Ubuntu 24.04)
+Laptop Hardware (Ubuntu 24.04)
 │
 ├── Docker Engine
 │   ├── Plex Media Server
-│   ├── Immich Server + Worker Components
+│   ├── Immich (Server / Web / Microservices / Machine Learning)
 │   ├── PostgreSQL (pgvector)
-│   └── Redis
+│   ├── Redis
+│   ├── Prometheus + Node Exporter + cAdvisor
+│   └── Grafana
 │
-└── External 5TB NTFS Drive (mounted at /mnt/storage)
-     ├── Movies/
-     ├── immich/
-     └── SMB Share: smb://<server-ip>/storage
+└── External 5TB USB 3.0 HDD  →  mounted at /mnt/storage
+      ├── Movies/
+      ├── immich/
+      ├── monitoring/
+      └── SMB share for macOS access
 ```
 
-Key design principles:
+### Design Principles
 
-- Containers run statelessly; persistent data lives on the mounted storage  
-- All services isolate configuration from stored media  
-- Laptop lid-close events disabled for uninterrupted operation  
-- Drive mounted via UUID for consistent availability  
+- **All app data lives on `/mnt/storage`**, not inside containers
+- **Laptop runs headless** via SSH (no keyboard/monitor needed)
+- **Docker Compose defines all services** and ensures reproducible builds
+- **External drive auto‑mounts on boot via UUID**
+- **Prometheus + Grafana monitor CPU, memory, containers, and disk SMART health**
+- **Samba enables macOS Finder access to the NAS**
 
-## 3. External Storage Configuration
+---
 
-The 5TB NTFS volume required repair:
+# 2. Preparing the Laptop (Ubuntu Setup)
 
+### Install Ubuntu 24.04  
+Repurpose the old Windows laptop → format → install Ubuntu.
+
+### Prevent laptop from sleeping
+To ensure Plex, Immich and downloads run all night:
+
+```
+sudo nano /etc/systemd/logind.conf
+HandleLidSwitch=ignore
+```
+
+```
+sudo systemctl restart systemd-logind
+```
+
+---
+
+# 3. Mounting the 5TB External HDD
+
+### 1. Identify drive
+```
+lsblk
+```
+
+Example:
+
+```
+sda1  →  5TB NTFS external HDD
+```
+
+### 2. Fix NTFS issues (required)
 ```
 sudo ntfsfix /dev/sda1
 ```
 
-Permanent mount via `/etc/fstab`:
+### 3. Get the UUID
+```
+sudo blkid
+```
 
+### 4. Add to `/etc/fstab`
 ```
 UUID=<YOUR-UUID> /mnt/storage ntfs defaults,uid=1000,gid=1000,umask=022 0 0
 ```
 
-This ensures stable media access for Plex and Immich after reboots.
+### 5. Mount
+```
+sudo mount -a
+```
 
-## 4. Docker Compose Deployment
+Folder structure:
 
-All services are orchestrated using Docker Compose.  
-Below is the complete production-ready configuration:
+```
+/mnt/storage
+├── Movies
+├── immich
+└── monitoring
+```
 
-```yaml
+---
+
+# 4. SMB File Sharing (macOS Access)
+
+Install Samba:
+
+```
+sudo apt install samba
+```
+
+Edit config:
+
+```
+sudo nano /etc/samba/smb.conf
+```
+
+Add:
+
+```
+[storage]
+    path = /mnt/storage
+    browseable = yes
+    writeable = yes
+    valid users = randy_ubuntu
+```
+
+Restart:
+
+```
+sudo systemctl restart smbd
+```
+
+On Mac Finder:
+
+```
+smb://<server-ip>/storage
+```
+
+---
+
+# 5. Docker Compose Deployment (Plex + Immich)
+
+Below is the full working stack:
+
+```
 services:
   immich-server:
     image: ghcr.io/immich-app/immich-server:release
@@ -147,67 +230,68 @@ Deploy:
 docker compose up -d
 ```
 
-## 5. SMB File Sharing
+---
 
-Install Samba:
+# 6. Monitoring Stack (Prometheus + Grafana + Node Exporter + cAdvisor + SMART)
 
-```
-sudo apt install samba
-```
+Monitoring folder: `/mnt/storage/monitoring`
 
-Add share:
+Features:
 
-```
-[storage]
-    path = /mnt/storage
-    browseable = yes
-    writeable = yes
-    valid users = <your-username>
-```
+- Container CPU / memory / restarts (cAdvisor)
+- Host CPU / RAM / Disk IO (Node Exporter)
+- HDD temperature, bad sectors, lifespan (SMART)
+- Grafana dashboards for everything
 
-Restart:
+## SMART Exporter (HDD/NVMe S.M.A.R.T. health)
 
 ```
-sudo systemctl restart smbd
+smartctl-exporter:
+  image: prometheuscommunity/smartctl-exporter:v0.14.0
+  container_name: smartctl-exporter
+  restart: always
+  privileged: true
+  ports:
+    - "9902:9902"
+  devices:
+    - "/dev/sda:/dev/sda"
+    - "/dev/nvme0:/dev/nvme0"
+  volumes:
+    - "/run/udev:/run/udev:ro"
 ```
 
-Access from macOS:
+Exposes:
 
-```
-smb://<server-ip>/storage
-```
+- Temperature  
+- Reallocated Sector Count  
+- Pending Sector Count  
+- Offline Uncorrectable  
+- NVMe wear %  
+- CRC Cable Errors  
 
-## 6. Operational Notes
+Prometheus scrapes all metrics.
 
-Common commands:
+Grafana visualizes them in a dashboard.
 
-```
-docker ps
-docker logs <container>
-docker restart <container>
-docker compose up -d
-docker compose down
-```
+---
 
-Laptop configured not to sleep on lid close:
+# 7. Lessons Learned
 
-```
-HandleLidSwitch=ignore
-```
+- NTFS drives usually require repair before Linux mounting  
+- Immich needs the pgvector-enabled Postgres image  
+- Docker dependency order matters during first migration  
+- SMB is the easiest way for macOS to interact with the NAS  
+- A laptop + external drive is surprisingly capable as a homelab  
+- Adding monitoring turns a DIY NAS into a semi‑professional system  
+- SMART metrics provide early warnings of HDD failure  
 
-## 7. Lessons Learned
+---
 
-- NTFS drives can require repair before Linux can mount them reliably  
-- Immich requires the proper Postgres image with pgvector support  
-- Container dependency ordering matters during initial database migration  
-- SMB is the cleanest way to manage large files from macOS  
-- A repurposed laptop is capable of running multiple media workloads efficiently  
+# 8. Future Enhancements
 
-## 8. Future Enhancements
-
-- HTTPS and reverse proxy (Caddy / Traefik)  
-- Automated PostgreSQL backups  
-- Trigger-based media indexing for Plex  
-- Cloud sync of critical data  
-- Monitoring stack (Prometheus, Grafana)  
-- Optional RAID mirroring with a second external drive  
+- Reverse proxy (Caddy / Traefik) with HTTPS  
+- Nightly Postgres backup to another disk or cloud  
+- Automatic Plex library refresh hooks  
+- A second external drive for mirroring (manual RAID1)  
+- Tailscale remote access  
+- Automated Ansible deployment  
