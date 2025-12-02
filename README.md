@@ -272,7 +272,8 @@ Exposes:
 Prometheus scrapes all metrics.
 
 Grafana visualizes them in a dashboard.
-
+![img.png](img.png)
+![img_1.png](img_1.png)
 ---
 
 # 7. Lessons Learned
