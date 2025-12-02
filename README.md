@@ -229,7 +229,7 @@ Deploy:
 ```
 docker compose up -d
 ```
-
+![img_2.png](img_2.png)
 ---
 
 # 6. Monitoring Stack (Prometheus + Grafana + Node Exporter + cAdvisor + SMART)
