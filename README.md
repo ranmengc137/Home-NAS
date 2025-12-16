@@ -277,7 +277,146 @@ Grafana visualizes them in a dashboard.
 ![img_1.png](img_1.png)
 ---
 
-# 7. Lessons Learned
+# 9. Power Management & Wake-on-LAN (WOL)
+
+To reduce power consumption while keeping the NAS remotely accessible, suspend / resume and Wake-on-LAN (WOL) were configured and verified.
+
+### Background
+
+This NAS runs on a repurposed laptop rather than a traditional server.  
+Unlike desktop NICs, laptop power management and USB Ethernet adapters make WOL significantly more complex, especially when the system enters S3 suspend.
+
+The goal was:
+- Allow the system to suspend when idle  
+- Wake it remotely from another device on the same network  
+- Keep all services (Plex, Immich, Docker) fully operational after resume  
+
+---
+
+### Network Interface & Capability Verification
+
+The system uses a USB Ethernet adapter (`enxa0cec87e4e9f`) connected via wired LAN.
+
+```
+ip link
+ethtool enxa0cec87e4e9f
+```
+
+Confirmed capabilities:
+- Wake-on-LAN supported: `pumbg`  
+- Magic packet wake (`g`) enabled  
+- Link remains active during suspend  
+
+This is a non-trivial setup, as many USB NICs lose power entirely during suspend.
+
+---
+
+### Enabling Suspend (systemd)
+
+Initially, suspend was blocked by system configuration:
+
+```
+Unit suspend.target is masked, refusing operation.
+```
+
+This was resolved by unmasking suspend:
+
+```
+sudo systemctl unmask suspend.target
+sudo systemctl unmask sleep.target
+sudo systemctl unmask hibernate.target
+sudo systemctl unmask hybrid-sleep.target
+```
+
+Suspend availability was verified via:
+
+```
+cat /sys/power/state
+```
+
+Result:
+
+```
+freeze mem
+```
+
+---
+
+### Preventing Lid Events from Blocking Headless Operation
+
+Because the system runs headless, lid close events must not interfere with power management.
+
+```
+sudo nano /etc/systemd/logind.conf
+```
+
+Configured:
+
+```
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
+```
+
+Applied via:
+
+```
+sudo systemctl restart systemd-logind
+```
+
+SSH connectivity remains active while the lid is closed.
+
+---
+
+### Persisting WOL Configuration
+
+To ensure WOL remains enabled after reboot or USB device reinitialization, a systemd service is used:
+
+```
+[Unit]
+Description=Enable Wake-on-LAN
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/ethtool -s enxa0cec87e4e9f wol g
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enabled with:
+
+```
+sudo systemctl enable wol.service
+```
+
+---
+
+### Wake-up Validation
+
+The system was successfully woken from suspend using a magic packet sent from macOS.
+
+This validated the complete chain:
+
+```
+Remote Device → Magic Packet → USB NIC → Kernel → systemd → Resume
+```
+
+All Docker services (Plex, Immich, monitoring stack) resumed normally after wake.
+
+---
+
+### Known Limitations
+- USB Ethernet WOL is less reliable than motherboard NICs  
+- After kernel updates or USB reconnection, WOL may need revalidation  
+- Long suspend durations may increase failure probability  
+
+Despite these constraints, the solution is reliable enough for daily home NAS usage.
+
+---
+
+# 10. Lessons Learned
 
 - NTFS drives usually require repair before Linux mounting  
 - Immich needs the pgvector-enabled Postgres image  
@@ -286,14 +425,18 @@ Grafana visualizes them in a dashboard.
 - A laptop + external drive is surprisingly capable as a homelab  
 - Adding monitoring turns a DIY NAS into a semi‑professional system  
 - SMART metrics provide early warnings of HDD failure  
+- Laptop-based NAS setups require more power management tuning than desktops  
+- Suspend can be silently blocked by systemd masking  
+- USB NIC WOL can work, but only with correct kernel + systemd alignment  
+- Observability (logs, journalctl, ethtool) is critical when debugging low-level issues  
+- Treating a homelab like production infrastructure leads to better outcomes  
 
 ---
 
-# 8. Future Enhancements
+# 11. Future Enhancements
 
-- Reverse proxy (Caddy / Traefik) with HTTPS  
-- Nightly Postgres backup to another disk or cloud  
-- Automatic Plex library refresh hooks  
-- A second external drive for mirroring (manual RAID1)  
-- Tailscale remote access  
-- Automated Ansible deployment  
+- Scheduled suspend / resume windows  
+- Remote WOL via Tailscale or Cloudflare Tunnel  
+- Public-domain HTTPS via Cloudflare + Caddy  
+- Automated health checks post-resume  
+- Secondary backup disk before aggressive power-saving policies  
